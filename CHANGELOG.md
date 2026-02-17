@@ -1,6 +1,9 @@
 # Changelog
 All notable changes to this project will be documented in this file.
 
+Fork 5.0.2 
+*Note:* HA version `2026.2` or higher required to support.
+
 ## 4.5.0
 
 *Note:* HA version `2022.3.0` or higher required to support new dropdown elements.
