@@ -1,6 +1,6 @@
 ((LitElement) => {
     console.info(
-        '%c XIAOMI-VACUUM-CARD %c 4.5.0 ',
+        '%c XIAOMI-VACUUM-CARD %c 5.0.2 ',
         'color: cyan; background: black; font-weight: bold;',
         'color: darkblue; background: white; font-weight: bold;',
     );
@@ -283,24 +283,58 @@
         }
 
         renderAttribute(data) {
-            const computeFunc = data.compute || (v => v);
-            const isValidSensorData = data && `${this.config.sensorEntity}_${data.key}` in this._hass.states;
-            const isValidAttribute = data && data.key in this.stateObj.attributes;
-            const isValidEntityData = data && data.key in this.stateObj;
+            if (!data) return null;
 
-            const value = isValidSensorData
-                ? computeFunc(this._hass.states[`${this.config.sensorEntity}_${data.key}`].state) + (data.unit || '')
-                : isValidAttribute
-                    ? computeFunc(this.stateObj.attributes[data.key]) + (data.unit || '')
-                    : isValidEntityData
-                        ? computeFunc(this.stateObj[data.key]) + (data.unit || '')
-                        : null;
+            const computeFunc = data.compute || (v => v);
+            let value = null;
+            let rawValue = null;
+
+            // Priority 1: Check if a specific entity is defined for this attribute
+            if (data.entity) {
+                console.log('Looking for entity:', data.entity);
+                console.log('Entity exists:', data.entity in this._hass.states);
+                const entityState = this._hass.states[data.entity];
+                if (entityState) {
+                    console.log('Entity state:', entityState.state);
+                    rawValue = entityState.state;
+                    // Check if state is unavailable or unknown
+                    if (rawValue !== 'unavailable' && rawValue !== 'unknown') {
+                        value = computeFunc(rawValue) + (data.unit || '');
+                        console.log('Computed value:', value);
+                    } else {
+                        console.log('Entity state is unavailable or unknown');
+                    }
+                } else {
+                    console.log('Entity not found in hass.states');
+                }
+            }
+            // Priority 2: Check for sensor entity pattern (sensor.vacuum_name_key)
+            else if (data.key) {
+                const sensorEntityId = `${this.config.sensorEntity}_${data.key}`;
+                if (sensorEntityId in this._hass.states) {
+                    rawValue = this._hass.states[sensorEntityId].state;
+                    if (rawValue !== 'unavailable' && rawValue !== 'unknown') {
+                        value = computeFunc(rawValue) + (data.unit || '');
+                    }
+                }
+                // Priority 3: Check vacuum entity attributes
+                else if (data.key in this.stateObj.attributes) {
+                    rawValue = this.stateObj.attributes[data.key];
+                    value = computeFunc(rawValue) + (data.unit || '');
+                }
+                // Priority 4: Check vacuum entity state properties
+                else if (data.key in this.stateObj) {
+                    rawValue = this.stateObj[data.key];
+                    value = computeFunc(rawValue) + (data.unit || '');
+                }
+            }
+
             const attribute = html`<div>
                 ${data.icon && this.renderIcon(data)}
                 ${(data.label || '') + (value !== null ? value : this._hass.localize('state.default.unavailable'))}
             </div>`;
 
-            const hasDropdown = `${data.key}_list` in this.stateObj.attributes;
+            const hasDropdown = data.key && `${data.key}_list` in this.stateObj.attributes;
 
             return (hasDropdown && value !== null)
                 ? this.renderDropdown(attribute, data.key, data.service)
@@ -345,7 +379,9 @@
 
         toggleMenu(key) {
             const menu = this.shadowRoot.querySelector(`#xvc-menu-${key}`);
-            menu.open = !menu.open;
+            if (menu) {
+                menu.open = !menu.open;
+            }
         }
 
         getCardSize() {
@@ -355,29 +391,65 @@
         }
 
         shouldUpdate(changedProps) {
-            return changedProps.has('stateObj');
+            return changedProps.has('stateObj') || changedProps.has('_hass');
         }
 
         setConfig(config) {
             if (!config.entity) throw new Error('Please define an entity.');
             if (config.entity.split('.')[0] !== 'vacuum') throw new Error('Please define a vacuum entity.');
-            if (config.vendor && !config.vendor in vendors) throw new Error('Please define a valid vendor.');
+            if (config.vendor && !(config.vendor in vendors)) throw new Error('Please define a valid vendor.');
 
             const vendor = vendors[config.vendor] || vendors.xiaomi;
+
+            // Process compute functions from config
+            const processComputeFunctions = (obj) => {
+                if (!obj || typeof obj !== 'object') return obj;
+                
+                const processed = {};
+                for (const [key, value] of Object.entries(obj)) {
+                    if (value && typeof value === 'object') {
+                        processed[key] = processComputeFunctions(value);
+                        
+                        // Convert string compute functions to actual functions
+                        if (value.compute && typeof value.compute === 'string') {
+                            try {
+                                // Handle common compute patterns
+                                if (value.compute === 'minToHour' || value.compute === 'min_to_hour') {
+                                    processed[key].compute = v => Math.floor(Number(v) / 60);
+                                } else if (value.compute === 'secToHour' || value.compute === 'sec_to_hour') {
+                                    processed[key].compute = v => Math.floor(Number(v) / 60 / 60);
+                                } else if (value.compute === 'divide100') {
+                                    processed[key].compute = v => Math.round(Number(v) / 100);
+                                } else if (value.compute === 'trueFalse') {
+                                    processed[key].compute = v => (v === true ? 'Yes' : (v === false ? 'No' : '-'));
+                                } else {
+                                    // Try to evaluate as function
+                                    processed[key].compute = new Function('v', `return ${value.compute}`);
+                                }
+                            } catch (e) {
+                                console.warn(`Invalid compute function for ${key}:`, e);
+                            }
+                        }
+                    } else {
+                        processed[key] = value;
+                    }
+                }
+                return processed;
+            };
 
             this.config = {
                 name: config.name,
                 entity: config.entity,
-                sensorEntity: `sensor.${config.entity.split('.')[1]}`,
+                sensorEntity: config.sensor_entity || `sensor.${config.entity.split('.')[1]}`,
                 show: {
                     name: config.name !== false,
                     state: config.state !== false,
                     attributes: config.attributes !== false,
                     buttons: config.buttons !== false,
                 },
-                buttons: this.deepMerge(buttons, vendor.buttons, config.buttons),
-                state: this.deepMerge(state, vendor.state, config.state),
-                attributes: this.deepMerge(attributes, vendor.attributes, config.attributes),
+                buttons: this.deepMerge(buttons, vendor.buttons, processComputeFunctions(config.buttons)),
+                state: this.deepMerge(state, vendor.state, processComputeFunctions(config.state)),
+                attributes: this.deepMerge(attributes, vendor.attributes, processComputeFunctions(config.attributes)),
                 styles: {
                     background: config.image ? `background-image: url('${config.image}'); color: white; text-shadow: 0 0 10px black;` : '',
                     icon: `color: ${config.image ? 'white' : 'var(--paper-item-icon-color)'};`,
@@ -404,16 +476,16 @@
 
         fireEvent(type, options = {}) {
             const event = new Event(type, {
-                bubbles: options.bubbles || true,
-                cancelable: options.cancelable || true,
-                composed: options.composed || true,
+                bubbles: options.bubbles !== undefined ? options.bubbles : true,
+                cancelable: options.cancelable !== undefined ? options.cancelable : true,
+                composed: options.composed !== undefined ? options.composed : true,
             });
             event.detail = {entityId: this.stateObj.entity_id};
             this.dispatchEvent(event);
         }
 
         deepMerge(...sources) {
-            const isObject = (obj) => obj && typeof obj === 'object';
+            const isObject = (obj) => obj && typeof obj === 'object' && !Array.isArray(obj);
             const target = {};
 
             sources.filter(source => isObject(source)).forEach(source => {
